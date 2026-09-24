@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="description" content="A Flappy Bird replica that runs in the browser and installs as an app.">
+<meta name="theme-color" content="#4ec0ca">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Flappy Bird">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<title>Flappy Bird</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: #1b1b2f;
+    font-family: "Segoe UI", Arial, sans-serif;
+    overflow: hidden;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #game {
+    display: block;
+    max-width: 100vw;
+    max-height: 100vh;
+    box-shadow: 0 0 40px rgba(0,0,0,0.6);
+  }
+  /* "Download app" button and iOS install hint, hidden until relevant */
+  #install, #ios-hint {
+    position: fixed;
+    left: 50%;
+    bottom: max(16px, env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    display: none;
+    font: bold 14px "Segoe UI", Arial, sans-serif;
+    color: #3d2d0c;
+    background: #ded895;
+    border: 3px solid #3d2d0c;
+    border-radius: 8px;
+    padding: 8px 14px;
+    box-shadow: 0 3px 0 #3d2d0c;
+    white-space: nowrap;
+  }
+  #install { cursor: pointer; }
+  #install:active { transform: translate(-50%, 2px); box-shadow: 0 1px 0 #3d2d0c; }
+  #ios-hint { font-weight: normal; font-size: 12px; text-align: center; white-space: normal; max-width: 240px; }
+  #ios-hint b { font-weight: bold; }
+  #ios-hint button {
+    display: block; margin: 6px auto 0; font: bold 11px "Segoe UI", Arial, sans-serif;
+    background: none; border: none; color: #3d2d0c; text-decoration: underline; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="288" height="512"></canvas>
+<button id="install" type="button">&#11015; Download app</button>
+<div id="ios-hint">To install: tap <b>Share</b> then <b>Add to Home Screen</b><button type="button" id="ios-hint-close">Dismiss</button></div>
+<script>
+(() => {
+  'use strict';
+
+  // ---------- Setup ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  // Logical playfield size. All game code draws in these units; the canvas
+  // itself is backed by a bitmap sized to the real screen so nothing is
+  // upscaled and edges stay crisp on any display.
+  const W = 288;
+  const H = 512;
+  let renderScale = 1;
+
+  function resize() {
+    const fit = Math.min(window.innerWidth / W, window.innerHeight / H);
+    const cssW = Math.floor(W * fit);
+    const cssH = Math.floor(H * fit);
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    renderScale = (cssW / W) * dpr;
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    canvas.width = Math.round(W * renderScale);
+    canvas.height = Math.round(H * renderScale);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- Constants ----------
+  const GROUND_H = 112;
+  const GROUND_Y = H - GROUND_H;
+  const GRAVITY = 0.42;
+  const FLAP_V = -7.2;
+  const MAX_FALL = 10;
+  const PIPE_W = 52;
+  const PIPE_GAP = 105;
+  const PIPE_SPACING = 150;
+  const PIPE_SPEED = 2;
+  const BIRD_X = 60;
+  const BIRD_R = 12;
+
+  const STATE = { READY: 0, PLAYING: 1, DEAD: 2 };
+
+  // ---------- Game state ----------
+  let state = STATE.READY;
+  let frame = 0;
+  let score = 0;
+  let best = 0;
+  try { best = parseInt(localStorage.getItem('flappy-best') || '0', 10) || 0; } catch (e) {}
+
+  const bird = { x: BIRD_X, y: H / 2, vy: 0, rot: 0, wing: 0 };
+  let pipes = [];
+  let groundX = 0;
+  let cloudX = 0;
+  let cityX = 0;
+  let flashAlpha = 0;
+  let deathTime = 0;
+
+  // ---------- Audio (tiny synthesized sfx, no files needed) ----------
+  let audio = null;
+  function beep(freq, dur, type, vol) {
+    try {
+      if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+      const o = audio.createOscillator();
+      const g = audio.createGain();
+      o.type = type || 'square';
+      o.frequency.setValueAtTime(freq, audio.currentTime);
+      g.gain.setValueAtTime(vol || 0.08, audio.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + dur);
+      o.connect(g).connect(audio.destination);
+      o.start();
+      o.stop(audio.currentTime + dur);
+    } catch (e) {}
+  }
+  const sfx = {
+    flap:  () => beep(600, 0.08, 'square', 0.05),
+    point: () => { beep(880, 0.08, 'sine', 0.08); setTimeout(() => beep(1320, 0.1, 'sine', 0.08), 60); },
+    hit:   () => beep(140, 0.25, 'sawtooth', 0.12),
+    die:   () => beep(220, 0.4, 'triangle', 0.1),
+  };
+
+  // ---------- Helpers ----------
+  function reset() {
+    state = STATE.READY;
+    score = 0;
+    frame = 0;
+    bird.y = H / 2;
+    bird.vy = 0;
+    bird.rot = 0;
+    pipes = [];
+  }
+
+  function spawnPipe() {
+    const minTop = 50;
+    const maxTop = GROUND_Y - PIPE_GAP - 50;
+    const top = minTop + Math.random() * (maxTop - minTop);
+    pipes.push({ x: W + 10, top: top, passed: false });
+  }
+
+  function flap() {
+    if (state === STATE.READY) {
+      state = STATE.PLAYING;
+      pipes = [];
+      spawnPipe();
+    }
+    if (state === STATE.PLAYING) {
+      bird.vy = FLAP_V;
+      sfx.flap();
+    } else if (state === STATE.DEAD) {
+      // Small delay so a frantic press right after dying doesn't instantly restart.
+      if (performance.now() - deathTime > 500) reset();
+    }
+  }
+
+  function die() {
+    if (state === STATE.DEAD) return;
+    state = STATE.DEAD;
+    deathTime = performance.now();
+    flashAlpha = 1;
+    sfx.hit();
+    setTimeout(sfx.die, 120);
+    if (score > best) {
+      best = score;
+      try { localStorage.setItem('flappy-best', String(best)); } catch (e) {}
+    }
+  }
+
+  // ---------- Input ----------
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') {
+      e.preventDefault();
+      if (!e.repeat) flap();
+    }
+  });
+  // Touch support for phones and tablets. Desktop stays Space-only.
+  const isTouch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+  canvas.addEventListener('touchstart', (e) => { e.preventDefault(); flap(); }, { passive: false });
+
+  // ---------- Update ----------
+  function update() {
+    frame++;
+
+    // Background parallax always scrolls except when dead.
+    if (state !== STATE.DEAD) {
+      groundX = (groundX - PIPE_SPEED) % 24;
+      cityX = (cityX - PIPE_SPEED * 0.25) % W;
+      cloudX = (cloudX - PIPE_SPEED * 0.1) % W;
+    }
+
+    if (state === STATE.READY) {
+      // Gentle bob while waiting.
+      bird.y = H / 2 + Math.sin(frame / 12) * 5;
+      bird.wing = Math.floor(frame / 6) % 3;
+      return;
+    }
+
+    // Physics
+    bird.vy = Math.min(bird.vy + GRAVITY, MAX_FALL);
+    bird.y += bird.vy;
+
+    // Rotation: tilt up when rising, nose-dive when falling.
+    const targetRot = bird.vy < 0 ? -0.45 : Math.min(Math.PI / 2, bird.vy * 0.15);
+    bird.rot += (targetRot - bird.rot) * (bird.vy < 0 ? 0.6 : 0.12);
+
+    if (state === STATE.PLAYING) {
+      bird.wing = Math.floor(frame / 4) % 3;
+
+      // Pipes
+      for (const p of pipes) p.x -= PIPE_SPEED;
+      if (pipes.length && pipes[pipes.length - 1].x < W - PIPE_SPACING) spawnPipe();
+      pipes = pipes.filter(p => p.x + PIPE_W > -10);
+
+      // Score
+      for (const p of pipes) {
+        if (!p.passed && p.x + PIPE_W < bird.x) {
+          p.passed = true;
+          score++;
+          sfx.point();
+        }
+      }
+
+      // Collision with ceiling
+      if (bird.y - BIRD_R < 0) { bird.y = BIRD_R; bird.vy = 0; }
+
+      // Collision with pipes (circle vs rect, slightly forgiving hitbox)
+      const r = BIRD_R - 2;
+      for (const p of pipes) {
+        const withinX = bird.x + r > p.x && bird.x - r < p.x + PIPE_W;
+        if (withinX) {
+          if (bird.y - r < p.top || bird.y + r > p.top + PIPE_GAP) { die(); break; }
+        }
+      }
+    }
+
+    // Collision with ground
+    if (bird.y + BIRD_R >= GROUND_Y) {
+      bird.y = GROUND_Y - BIRD_R;
+      bird.vy = 0;
+      die();
+    }
+  }
+
+  // ---------- Drawing ----------
+  function drawBackground() {
+    // Sky gradient
+    const sky = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+    sky.addColorStop(0, '#4ec0ca');
+    sky.addColorStop(1, '#a8e6ee');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, GROUND_Y);
+
+    // Clouds (two copies for seamless looping)
+    ctx.fillStyle = '#ffffff';
+    for (let k = 0; k < 2; k++) {
+      const ox = cloudX + k * W;
+      const clouds = [[30, 300, 26], [60, 290, 34], [95, 305, 22], [170, 280, 30], [205, 292, 24], [250, 300, 28]];
+      for (const [cx, cy, cr] of clouds) {
+        ctx.beginPath();
+        ctx.arc(ox + cx, cy, cr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.fillRect(0, 300, W, GROUND_Y - 300);
+
+    // City skyline
+    ctx.fillStyle = '#d9f5d0';
+    for (let k = 0; k < 2; k++) {
+      const ox = cityX + k * W;
+      const buildings = [[0, 40], [22, 60], [48, 35], [66, 75], [90, 50], [118, 65], [140, 42], [162, 80], [190, 55], [214, 48], [238, 70], [262, 45]];
+      for (const [bx, bh] of buildings) {
+        ctx.fillRect(ox + bx, GROUND_Y - 22 - bh, 20, bh + 22);
+      }
+    }
+
+    // Bushes
+    ctx.fillStyle = '#9be36a';
+    for (let k = 0; k < 2; k++) {
+      const ox = cityX + k * W;
+      for (let i = 0; i < 12; i++) {
+        ctx.beginPath();
+        ctx.arc(ox + i * 26 + 12, GROUND_Y - 8, 18, Math.PI, 0);
+        ctx.fill();
+      }
+    }
+    ctx.fillRect(0, GROUND_Y - 8, W, 8);
+  }
+
+  function drawPipe(p) {
+    const capH = 26;
+    const draw = (y, h, flip) => {
+      // Body
+      const grad = ctx.createLinearGradient(p.x, 0, p.x + PIPE_W, 0);
+      grad.addColorStop(0, '#5fb84b');
+      grad.addColorStop(0.3, '#8fe36b');
+      grad.addColorStop(0.7, '#73d153');
+      grad.addColorStop(1, '#3f8a2f');
+      ctx.fillStyle = grad;
+      ctx.fillRect(p.x + 2, y, PIPE_W - 4, h);
+      ctx.strokeStyle = '#2f5d24';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(p.x + 2, y, PIPE_W - 4, h);
+
+      // Cap
+      const cy = flip ? y + h - capH : y;
+      ctx.fillStyle = grad;
+      ctx.fillRect(p.x, cy, PIPE_W, capH);
+      ctx.strokeRect(p.x, cy, PIPE_W, capH);
+    };
+    draw(-2, p.top + 2, true);
+    draw(p.top + PIPE_GAP, GROUND_Y - (p.top + PIPE_GAP) + 2, false);
+  }
+
+  function drawGround() {
+    ctx.fillStyle = '#ded895';
+    ctx.fillRect(0, GROUND_Y, W, GROUND_H);
+    // Top strip with diagonal stripes
+    ctx.fillStyle = '#73bf2e';
+    ctx.fillRect(0, GROUND_Y, W, 14);
+    ctx.fillStyle = '#9be36a';
+    for (let x = groundX - 24; x < W + 24; x += 24) {
+      ctx.beginPath();
+      ctx.moveTo(x, GROUND_Y);
+      ctx.lineTo(x + 12, GROUND_Y);
+      ctx.lineTo(x + 24, GROUND_Y + 14);
+      ctx.lineTo(x + 12, GROUND_Y + 14);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.fillStyle = '#5a3d1e';
+    ctx.fillRect(0, GROUND_Y + 14, W, 3);
+  }
+
+  function drawBird() {
+    ctx.save();
+    ctx.translate(bird.x, bird.y);
+    ctx.rotate(bird.rot);
+
+    // Body
+    ctx.fillStyle = '#f9d64b';
+    ctx.strokeStyle = '#3d2d0c';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 13, 11, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Wing (three-frame flap)
+    const wingY = bird.wing === 0 ? -3 : bird.wing === 1 ? 1 : 5;
+    ctx.fillStyle = '#f2b93c';
+    ctx.beginPath();
+    ctx.ellipse(-4, wingY, 7, 4.5, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Eye
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(5, -4, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#111';
+    ctx.beginPath();
+    ctx.arc(6.5, -4, 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Beak
+    ctx.fillStyle = '#f0552b';
+    ctx.beginPath();
+    ctx.moveTo(8, 1);
+    ctx.lineTo(17, 3);
+    ctx.lineTo(8, 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawText(text, x, y, size, align) {
+    ctx.font = 'bold ' + size + 'px "Segoe UI", Arial, sans-serif';
+    ctx.textAlign = align || 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = Math.max(3, size / 8);
+    ctx.strokeStyle = '#3d2d0c';
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(text, x, y);
+  }
+
+  function drawPanel(x, y, w, h) {
+    ctx.fillStyle = '#ded895';
+    ctx.strokeStyle = '#3d2d0c';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 8);
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  function drawUI() {
+    if (state === STATE.READY) {
+      drawText('Flappy Bird', W / 2, 110, 36);
+      drawText('Get Ready!', W / 2, 165, 22);
+      // Tap hint
+      const bob = Math.sin(frame / 10) * 3;
+      drawText(isTouch ? 'TAP' : 'Press SPACE', W / 2, 300 + bob, 16);
+      drawText('to jump', W / 2, 322 + bob, 14);
+      if (best > 0) drawText('Best: ' + best, W / 2, GROUND_Y + 60, 16);
+    } else if (state === STATE.PLAYING) {
+      drawText(String(score), W / 2, 50, 40);
+    } else {
+      drawText('Game Over', W / 2, 120, 34);
+      drawPanel(44, 165, 200, 110);
+      ctx.fillStyle = '#e07a2b';
+      ctx.font = 'bold 14px "Segoe UI", Arial, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('SCORE', 64, 192);
+      ctx.fillText('BEST', 64, 240);
+      drawText(String(score), 224, 192, 26, 'right');
+      drawText(String(best), 224, 240, 26, 'right');
+      if (score >= best && score > 0) {
+        ctx.fillStyle = '#e94b3c';
+        ctx.font = 'bold 10px "Segoe UI", Arial, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('NEW', 64, 258);
+      }
+      if (performance.now() - deathTime > 500) {
+        const bob = Math.sin(frame / 10) * 3;
+        drawText(isTouch ? 'TAP to restart' : 'SPACE to restart', W / 2, 310 + bob, 16);
+      }
+    }
+  }
+
+  function draw() {
+    ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    drawBackground();
+    for (const p of pipes) drawPipe(p);
+    drawGround();
+    drawBird();
+    drawUI();
+
+    if (flashAlpha > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,' + flashAlpha + ')';
+      ctx.fillRect(0, 0, W, H);
+      flashAlpha = Math.max(0, flashAlpha - 0.08);
+    }
+  }
+
+  // ---------- Main loop (fixed 60 Hz step, decoupled from display rate) ----------
+  const STEP = 1000 / 60;
+  let last = performance.now();
+  let acc = 0;
+  function loop(now) {
+    acc += Math.min(now - last, 100);
+    last = now;
+    while (acc >= STEP) {
+      update();
+      acc -= STEP;
+    }
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // ---------- Install as an app (PWA) ----------
+  const installBtn = document.getElementById('install');
+  const iosHint = document.getElementById('ios-hint');
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  let deferredPrompt = null;
+
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    if (!standalone) installBtn.style.display = 'block';
+  });
+  installBtn.addEventListener('click', async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    try { await deferredPrompt.userChoice; } catch (err) {}
+    deferredPrompt = null;
+    installBtn.style.display = 'none';
+    installBtn.blur();
+  });
+  window.addEventListener('appinstalled', () => { installBtn.style.display = 'none'; });
+
+  // iOS Safari has no install prompt API; show a one-time hint instead.
+  const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  let hintDismissed = false;
+  try { hintDismissed = localStorage.getItem('flappy-ios-hint') === '1'; } catch (e) {}
+  if (isIOS && !standalone && !hintDismissed) iosHint.style.display = 'block';
+  document.getElementById('ios-hint-close').addEventListener('click', () => {
+    iosHint.style.display = 'none';
+    try { localStorage.setItem('flappy-ios-hint', '1'); } catch (e) {}
+  });
+
+  // Offline support. Service workers only run over https (or localhost),
+  // so this is silently skipped when the file is opened directly.
+  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    });
+  }
+})();
+</script>
+</body>
+</html>
