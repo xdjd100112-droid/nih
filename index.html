@@ -157,6 +157,9 @@
       if (!e.repeat) flap();
     }
   });
+  // Touch support for phones and tablets. Desktop stays Space-only.
+  const isTouch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+  canvas.addEventListener('touchstart', (e) => { e.preventDefault(); flap(); }, { passive: false });
 
   // ---------- Update ----------
   function update() {
@@ -385,7 +388,7 @@
       drawText('Get Ready!', W / 2, 165, 22);
       // Tap hint
       const bob = Math.sin(frame / 10) * 3;
-      drawText('Press SPACE', W / 2, 300 + bob, 16);
+      drawText(isTouch ? 'TAP' : 'Press SPACE', W / 2, 300 + bob, 16);
       drawText('to jump', W / 2, 322 + bob, 14);
       if (best > 0) drawText('Best: ' + best, W / 2, GROUND_Y + 60, 16);
     } else if (state === STATE.PLAYING) {
@@ -409,7 +412,7 @@
       }
       if (performance.now() - deathTime > 500) {
         const bob = Math.sin(frame / 10) * 3;
-        drawText('SPACE to restart', W / 2, 310 + bob, 16);
+        drawText(isTouch ? 'TAP to restart' : 'SPACE to restart', W / 2, 310 + bob, 16);
       }
     }
   }
