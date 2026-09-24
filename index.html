@@ -2,7 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="description" content="A Flappy Bird replica that runs in the browser and installs as an app.">
+<meta name="theme-color" content="#4ec0ca">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Flappy Bird">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <title>Flappy Bird</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -24,14 +33,38 @@
     display: block;
     max-width: 100vw;
     max-height: 100vh;
-    image-rendering: pixelated;
-    image-rendering: crisp-edges;
     box-shadow: 0 0 40px rgba(0,0,0,0.6);
+  }
+  /* "Download app" button and iOS install hint, hidden until relevant */
+  #install, #ios-hint {
+    position: fixed;
+    left: 50%;
+    bottom: max(16px, env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    display: none;
+    font: bold 14px "Segoe UI", Arial, sans-serif;
+    color: #3d2d0c;
+    background: #ded895;
+    border: 3px solid #3d2d0c;
+    border-radius: 8px;
+    padding: 8px 14px;
+    box-shadow: 0 3px 0 #3d2d0c;
+    white-space: nowrap;
+  }
+  #install { cursor: pointer; }
+  #install:active { transform: translate(-50%, 2px); box-shadow: 0 1px 0 #3d2d0c; }
+  #ios-hint { font-weight: normal; font-size: 12px; text-align: center; white-space: normal; max-width: 240px; }
+  #ios-hint b { font-weight: bold; }
+  #ios-hint button {
+    display: block; margin: 6px auto 0; font: bold 11px "Segoe UI", Arial, sans-serif;
+    background: none; border: none; color: #3d2d0c; text-decoration: underline; cursor: pointer;
   }
 </style>
 </head>
 <body>
 <canvas id="game" width="288" height="512"></canvas>
+<button id="install" type="button">&#11015; Download app</button>
+<div id="ios-hint">To install: tap <b>Share</b> then <b>Add to Home Screen</b><button type="button" id="ios-hint-close">Dismiss</button></div>
 <script>
 (() => {
   'use strict';
@@ -39,14 +72,23 @@
   // ---------- Setup ----------
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
-  const W = canvas.width;
-  const H = canvas.height;
+  // Logical playfield size. All game code draws in these units; the canvas
+  // itself is backed by a bitmap sized to the real screen so nothing is
+  // upscaled and edges stay crisp on any display.
+  const W = 288;
+  const H = 512;
+  let renderScale = 1;
 
-  // Scale the canvas to fit the window while keeping the aspect ratio.
   function resize() {
-    const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
-    canvas.style.width = Math.floor(W * scale) + 'px';
-    canvas.style.height = Math.floor(H * scale) + 'px';
+    const fit = Math.min(window.innerWidth / W, window.innerHeight / H);
+    const cssW = Math.floor(W * fit);
+    const cssH = Math.floor(H * fit);
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    renderScale = (cssW / W) * dpr;
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    canvas.width = Math.round(W * renderScale);
+    canvas.height = Math.round(H * renderScale);
   }
   window.addEventListener('resize', resize);
   resize();
@@ -418,6 +460,8 @@
   }
 
   function draw() {
+    ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
+    ctx.imageSmoothingEnabled = true;
     drawBackground();
     for (const p of pipes) drawPipe(p);
     drawGround();
@@ -446,6 +490,45 @@
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
+
+  // ---------- Install as an app (PWA) ----------
+  const installBtn = document.getElementById('install');
+  const iosHint = document.getElementById('ios-hint');
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  let deferredPrompt = null;
+
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    if (!standalone) installBtn.style.display = 'block';
+  });
+  installBtn.addEventListener('click', async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    try { await deferredPrompt.userChoice; } catch (err) {}
+    deferredPrompt = null;
+    installBtn.style.display = 'none';
+    installBtn.blur();
+  });
+  window.addEventListener('appinstalled', () => { installBtn.style.display = 'none'; });
+
+  // iOS Safari has no install prompt API; show a one-time hint instead.
+  const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  let hintDismissed = false;
+  try { hintDismissed = localStorage.getItem('flappy-ios-hint') === '1'; } catch (e) {}
+  if (isIOS && !standalone && !hintDismissed) iosHint.style.display = 'block';
+  document.getElementById('ios-hint-close').addEventListener('click', () => {
+    iosHint.style.display = 'none';
+    try { localStorage.setItem('flappy-ios-hint', '1'); } catch (e) {}
+  });
+
+  // Offline support. Service workers only run over https (or localhost),
+  // so this is silently skipped when the file is opened directly.
+  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    });
+  }
 })();
 </script>
 </body>
