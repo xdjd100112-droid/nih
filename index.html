@@ -27,7 +27,6 @@
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     box-shadow: 0 0 40px rgba(0,0,0,0.6);
-    cursor: pointer;
   }
 </style>
 </head>
@@ -133,7 +132,7 @@
       bird.vy = FLAP_V;
       sfx.flap();
     } else if (state === STATE.DEAD) {
-      // Small delay so a frantic tap right after dying doesn't instantly restart.
+      // Small delay so a frantic press right after dying doesn't instantly restart.
       if (performance.now() - deathTime > 500) reset();
     }
   }
@@ -153,13 +152,11 @@
 
   // ---------- Input ----------
   window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+    if (e.code === 'Space') {
       e.preventDefault();
       if (!e.repeat) flap();
     }
   });
-  canvas.addEventListener('mousedown', (e) => { e.preventDefault(); flap(); });
-  canvas.addEventListener('touchstart', (e) => { e.preventDefault(); flap(); }, { passive: false });
 
   // ---------- Update ----------
   function update() {
@@ -388,8 +385,8 @@
       drawText('Get Ready!', W / 2, 165, 22);
       // Tap hint
       const bob = Math.sin(frame / 10) * 3;
-      drawText('TAP / SPACE', W / 2, 300 + bob, 16);
-      drawText('to flap', W / 2, 322 + bob, 14);
+      drawText('Press SPACE', W / 2, 300 + bob, 16);
+      drawText('to jump', W / 2, 322 + bob, 14);
       if (best > 0) drawText('Best: ' + best, W / 2, GROUND_Y + 60, 16);
     } else if (state === STATE.PLAYING) {
       drawText(String(score), W / 2, 50, 40);
@@ -412,7 +409,7 @@
       }
       if (performance.now() - deathTime > 500) {
         const bob = Math.sin(frame / 10) * 3;
-        drawText('TAP to restart', W / 2, 310 + bob, 16);
+        drawText('SPACE to restart', W / 2, 310 + bob, 16);
       }
     }
   }
